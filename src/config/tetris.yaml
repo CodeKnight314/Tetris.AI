@@ -1,0 +1,12 @@
+frame_stack: 4
+lr: 0.0001
+gamma: 0.995
+max_memory: 50000
+max_gradient: 0.5
+epsilon: 1.0
+epsilon_min: 0.01
+epsilon_decay: 0.995
+batch_size: 32
+update_freq: 1000
+max_frames: 10000000
+reward_weights: [-0.1, -0.05, -0.01, 1.0]
