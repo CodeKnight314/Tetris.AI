@@ -10,9 +10,7 @@ from src.reward_shaper import RewardShaping
 import yaml
 import logging
 import matplotlib.pyplot as plt
-import ale_py
-
-gym.register_envs(ale_py)
+from tetris_gymnasium.envs import Tetris
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,7 +35,7 @@ class TetrisEnv():
         self.reward_shaper = RewardShaping(self.config["reward_weights"])
         
         self.env = gym.vector.AsyncVectorEnv(
-            [lambda: self._make_env("ALE/Tetris-v5") for i in range(num_envs)], 
+            [lambda: self._make_env() for i in range(num_envs)], 
             autoreset_mode=gym.vector.AutoresetMode.NEXT_STEP
         )
         
@@ -46,6 +44,7 @@ class TetrisEnv():
         logger.info(f"- Learning rate: {self.config['lr']}")
         logger.info(f"- Gamma: {self.config['gamma']}")
         logger.info(f"- Max memory: {self.config['max_memory']}")
+        logger.info(f"- Weights: {self.config['reward_weights']}")
         
         self.agent = TetrisAgent(self.config["frame_stack"], 
                                  self.env.action_space[0].n, 
@@ -81,22 +80,12 @@ class TetrisEnv():
         torch.manual_seed(seed)
         np.random.seed(seed)
         
-    def _make_env(self, env_name: str, record_video: bool = False):
-        if record_video: 
-            env = gym.make(env_name, render_mode="rgb_array")
-            video_path = "videos/"
-            os.makedirs(video_path)
-            env = RecordVideo(env, video_folder=video_path, episode_trigger=lambda x: True)
-            env = MaxAndSkipEnv(env, skip=4)
-            env = ResizeObservation(env, (84, 84))
-            env = FrameStackObservation(env, stack_size=int(self.config["frame_stack"]))
-        else:
-            env = gym.make(env_name, obs_type="grayscale", render_mode=None)
-            env = MaxAndSkipEnv(env, skip=4)
-            env = TetrisPreprocessor(env, coord=(27, 203, 22, 63))
-            env = ResizeObservation(env, (84, 84))
-            env = FrameStackObservation(env, stack_size=4)
-            env = ShapedRewardWrapper(env, self.reward_shaper)
+    def _make_env(self, render_mode: str = None):
+        env = gym.make("tetris_gymnasium/Tetris", render_mode=render_mode)
+        env = TetrisPreprocessor(env)
+        env = ResizeObservation(env, (84, 84))
+        env = ShapedRewardWrapper(env, self.reward_shaper)
+        env = FrameStackObservation(env, stack_size=int(self.config["frame_stack"]))
         return env
 
     def train(self, path: str):
@@ -112,7 +101,7 @@ class TetrisEnv():
         pbar = tqdm(total=self.max_frames, desc="Frames")
 
         while total_frames < self.max_frames:
-            epsilon = max(self.epsilon_min, self.epsilon - (total_frames * self.epsilon_decay / self.max_frames))
+            epsilon = max(self.epsilon_min, self.epsilon * (self.epsilon_decay ** (total_frames / 1000)))
             actions = []
             for i in range(self.num_envs):
                 single_board = state[i]
@@ -156,49 +145,64 @@ class TetrisEnv():
                     logger.info(f"New best model saved! Average reward: {recent_reward_avg:.2f}")
 
             if total_frames % self.save_freq == 0:
-                checkpoint_path = os.path.join(path, f"checkpoint_{total_frames}.pth")
+                checkpoint_path = os.path.join(path, f"checkpoint.pth")
                 self.agent.save_weights(checkpoint_path)
                 logger.info(f"Checkpoint saved at frame {total_frames}")
 
             state = next_state
 
-            pbar.set_postfix(reward=np.mean(self.history["reward"][-10:]), loss=np.mean(self.history["loss"][-10:]))
+            pbar.set_postfix(reward=np.mean(self.history["reward"][-10:]) if self.history["reward"] else 0, 
+                           loss=np.mean(self.history["loss"][-10:]) if self.history["loss"] else 0, 
+                           epsilon=epsilon)
 
         pbar.close()
         logger.info("Training completed. Saving final model weights...")
         self.agent.save_weights(os.path.join(path, "final_model.pth"))
         logger.info(f"Final model weights saved to: {os.path.join(path, 'final_model.pth')}")
 
-    def test(self, output_path: str, num_episodes: int):
-        os.makedirs(output_path, exist_ok=True)
+    def test(self, path: str, num_episodes: int):
+        import cv2
+        os.makedirs(path, exist_ok=True)
         
-        self.env = self._make_env("tetris_gymnasium/Tetris", True)
-        episodes_reward = []
-        episodes_length = []
-        
+        self.env = self._make_env(render_mode="rgb_array")
         self.agent.model.eval()
-        
-        logger.info(f"Starting testing phase with {num_episodes} episodes")
+
+        state, _ = self.env.reset()
+        frame = self.env.render()
+        height, width, _ = frame.shape
+
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video_path = os.path.join(path, "tetris.mp4")
+        video = cv2.VideoWriter(video_path, fourcc, 60, (width, height))
+
+        total_rewards = 0
+        total_steps = 0
+
         for i in range(num_episodes):
-            logger.info(f"Recording episode {i + 1}/{num_episodes}")
-            
-            state, info = self.env.reset()
-            episode_reward = 0
-            episdoe_length = 0
+            state, _ = self.env.reset()
             done = False
-            
-            while not done: 
-                if isinstance(state, dict):
-                    board = state["board"]
-                else: 
-                    board = state
-                    
-                with torch.no_grad():
-                    action = self.agent.select_action(action, epsilon=0.0)
-                    
-                next_state, reward, terminated, truncated, _ = self.env.step(action)
-        
-    
+            rewards = 0
+            steps = 0
+            while not done:
+                frame = self.env.render()
+                video.write(frame)
+                state, reward, terminated, truncated, _ = self.env.step(self.agent.select_action(state, 0.0))
+                done = terminated or truncated
+                rewards += reward
+                steps += 1
+
+            logger.info(f"Episode {i + 1} - Reward: {rewards:.2f} - Steps: {steps}")
+            total_rewards += rewards    
+            total_steps += steps
+
+        avg_reward = total_rewards / num_episodes
+        avg_steps = total_steps / num_episodes
+
+        logger.info(f"Average reward: {avg_reward:.2f} - Average steps: {avg_steps:.2f}")
+
+        video.release()
+        logger.info(f"Video saved to: {video_path}")
+
     def close(self):
         self.env.close() 
         del self.agent
