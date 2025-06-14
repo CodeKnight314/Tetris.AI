@@ -4,28 +4,37 @@ from gymnasium.spaces import Box, Dict
 from typing import Tuple
 import cv2
 from src.reward_shaper import RewardShaping
+from gymnasium import spaces
 
 class TetrisPreprocessor(gym.Wrapper):
-    def __init__(self, env, coord: Tuple[int, int, int, int] = (27, 203, 22, 63)):
+    def __init__(self, env, coord: Tuple[int, int, int, int] = (4, 0, 13, 19)):
         super().__init__(env)
-        self.top, self.bottom, self.left, self.right = coord
+        self.coord = coord
+        board_space = env.observation_space.spaces["board"]
+        assert isinstance(board_space, spaces.Box), "expected board to be a Box"
+        self.observation_space = spaces.Box(
+            low=0,
+            high=255,
+            shape=board_space.shape,
+            dtype=np.uint8
+        )
+
         self.raw_board = None
 
-    def observation(self, obs: np.ndarray) -> np.ndarray:
-        cropped = obs[self.top:self.bottom, self.left:self.right]
-        binary = np.where(cropped == 111, 0, 255).astype(np.uint8)
-        self.raw_board = (binary // 255).astype(np.uint8)
+    def observation(self, obs: dict) -> np.ndarray:
+        board = obs["board"].astype(np.uint8)
+        binary = np.where(board == 0, 0, 255).astype(np.uint8)
+        binary = binary[self.coord[1]:self.coord[3]+1, self.coord[0]:self.coord[2]+1]
+        self.raw_board = binary
         return binary
 
     def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        obs = self.observation(obs)
-        return obs, reward, terminated, truncated, info
+        obs, reward, term, trunc, info = self.env.step(action)
+        return self.observation(obs), reward, term, trunc, info
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        obs = self.observation(obs)
-        return obs, info
+        return self.observation(obs), info
 
 class ShapedRewardWrapper(gym.Wrapper):
     def __init__(self, env: gym.Env, reward_shaper: RewardShaping):
@@ -49,9 +58,7 @@ class ShapedRewardWrapper(gym.Wrapper):
         if raw is None:
             raise RuntimeError("Could not find `raw_board` in any wrapper.")
 
-        small_board = cv2.resize(raw, (10, 20), interpolation=cv2.INTER_NEAREST)
-
-        shaped_only = self.reward_shaper.calculate_rewards(small_board)
+        shaped_only = self.reward_shaper.calculate_rewards(raw)
 
         combined = original_reward + shaped_only
 
