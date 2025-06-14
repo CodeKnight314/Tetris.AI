@@ -46,7 +46,7 @@ class TetrisAgent:
                 state = torch.as_tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
             state = state.to(self.device)
             
-            q_values = self.model(state)
+            q_values = self.model(state, normalize=True)
             action = torch.argmax(q_values).item()
             
             return action
@@ -58,14 +58,14 @@ class TetrisAgent:
         actions = actions.long()
         
         with torch.no_grad():
-            next_actions = self.model(next_states).argmax(1, keepdim=True)
-            max_next_q = self.target(next_states).gather(1, next_actions)           
+            next_actions = self.model(next_states, normalize=True).argmax(1, keepdim=True)
+            max_next_q = self.target(next_states, normalize=True).gather(1, next_actions)           
             
             dones = dones.unsqueeze(-1)
             targets = rewards.unsqueeze(-1) + (1 - dones) * self.gamma * max_next_q
             targets = targets.squeeze(1).to(self.device)
 
-        current_q_values = self.model(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+        current_q_values = self.model(states, normalize=True).gather(1, actions.unsqueeze(1)).squeeze(1)
         loss = self.criterion(current_q_values, targets)
         
         self.opt.zero_grad()
