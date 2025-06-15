@@ -4,10 +4,11 @@ import torch
 from torch.optim import AdamW
 import torch.nn as nn
 import numpy as np
+from typing import Tuple
 
 class TetrisAgent: 
-    def __init__(self, frame_stack: int, ac_dim: int, lr: float = 1e-4, gamma: float = 0.99, max_memory: int = 1000, max_gradient: float = 0.5):
-        
+    def __init__(self, frame_stack: int, ac_dim: int, lr: float = 1e-4, gamma: float = 0.99, max_memory: int = 1000, max_gradient: float = 0.5, action_mask: Tuple[int] = [5, 6]):
+        self.action_mask = action_mask
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.buffer = ReplayBuffer(max_memory, self.device)
         
@@ -20,7 +21,7 @@ class TetrisAgent:
         self.gamma = gamma
         self.action_dim = ac_dim
         self.max_grad = max_gradient
-        
+
         self.update_target_network(True)
         
     def load_weights(self, path: str): 
@@ -39,17 +40,26 @@ class TetrisAgent:
                 
     def select_action(self, state: torch.Tensor, epsilon: float = 0.01):
         if np.random.random() < epsilon:
-            return np.random.randint(self.action_dim)
+            valid_actions = [i for i in range(self.action_dim) if i not in self.action_mask]
+            return np.random.choice(valid_actions)
         
         with torch.no_grad(): 
             if not isinstance(state, torch.Tensor):
                 state = torch.as_tensor(state, dtype=torch.float32).unsqueeze(0).to(self.device)
             state = state.to(self.device)
             
-            q_values = self.model(state, normalize=True)
-            action = torch.argmax(q_values).item()
+            q_values = self.model(state, normalize=False)
+            q_values_original = q_values.detach().clone()
             
-            return action
+            if q_values.dim() == 1:
+                for action in self.action_mask:
+                    q_values[action] = -float("inf")
+            else:
+                for action in self.action_mask:
+                    q_values[0, action] = -float("inf")
+
+            action = torch.argmax(q_values, dim=1).item()
+            return (action, q_values_original.sum().item())
             
     def update(self, batch_size: int):
         batch = self.buffer.sample(batch_size)
@@ -65,7 +75,7 @@ class TetrisAgent:
             targets = rewards.unsqueeze(-1) + (1 - dones) * self.gamma * max_next_q
             targets = targets.squeeze(1).to(self.device)
 
-        current_q_values = self.model(states, normalize=True).gather(1, actions.unsqueeze(1)).squeeze(1)
+        current_q_values = self.model(states, normalize=False).gather(1, actions.unsqueeze(1)).squeeze(1)
         loss = self.criterion(current_q_values, targets)
         
         self.opt.zero_grad()
