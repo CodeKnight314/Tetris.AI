@@ -11,6 +11,7 @@ import yaml
 import logging
 import matplotlib.pyplot as plt
 from tetris_gymnasium.envs import Tetris
+from collections import deque
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class TetrisEnv(): 
-    def __init__(self, seed: int, num_envs: int, config: str, weights: str = None):
+    def __init__(self, seed: int, num_envs: int, config: str, weights: str = None, verbose: bool = False):
         logger.info(f"Initializing Tetris environment with {num_envs} parallel environments")
         with open(config, 'r') as f: 
             self.config = yaml.safe_load(f)
@@ -45,21 +46,23 @@ class TetrisEnv():
         logger.info(f"- Gamma: {self.config['gamma']}")
         logger.info(f"- Max memory: {self.config['max_memory']}")
         logger.info(f"- Weights: {self.config['reward_weights']}")
+        logger.info(f"- Action Space: {self.env.action_space[0].n}")
         
         self.agent = TetrisAgent(self.config["frame_stack"], 
                                  self.env.action_space[0].n, 
                                  self.config["lr"], 
                                  self.config["gamma"], 
                                  self.config["max_memory"], 
-                                 self.config["max_gradient"])
+                                 self.config["max_gradient"], 
+                                 self.config["action_mask"])
         
         if weights is not None: 
             logger.info(f"Loading pre-trained weights from: {weights}")
             self.agent.load_weights(weights)
 
         self.history = {
-            "reward": [],
-            "loss": [],
+            "reward": deque(maxlen=self.config["window_size"] * 2),
+            "loss": deque(maxlen=self.config["window_size"] * 2),
         }
         
         self.epsilon = self.config["epsilon"]
@@ -69,10 +72,11 @@ class TetrisEnv():
         self.max_frames = self.config["max_frames"]
         self.batch_size = self.config["batch_size"]
         self.update_freq = self.config["update_freq"]
+        self.reward_window_size = self.config["window_size"]
         
         self.best_reward = float('-inf')
-        self.reward_window_size = 100
-        self.save_freq = 1000
+        self.save_freq = self.config["save_freq"]
+        self.verbose = verbose
         
         logger.info(f"Environment initialized with seed: {seed}")
         
@@ -103,10 +107,17 @@ class TetrisEnv():
         while total_frames < self.max_frames:
             epsilon = max(self.epsilon_min, self.epsilon * (self.epsilon_decay ** (total_frames / 1000)))
             actions = []
+            q_values = []
             for i in range(self.num_envs):
                 single_board = state[i]
-                a_i = self.agent.select_action(single_board, epsilon)
-                actions.append(int(a_i))
+                output = self.agent.select_action(single_board, epsilon)
+                if isinstance(output, tuple):
+                    a_i, q_value = output
+                    actions.append(int(a_i))
+                    q_values.append(q_value)
+                else: 
+                    a_i = output
+                    actions.append(int(a_i))
             actions = np.array(actions, dtype=np.int32)
 
             next_state, rewards, terminateds, truncateds, infos = self.env.step(actions)
@@ -137,23 +148,44 @@ class TetrisEnv():
                 logger.info(f"Target network updated at frame {total_frames}")
 
             if len(self.history["reward"]) >= self.reward_window_size:
-                recent_reward_avg = np.mean(self.history["reward"][-self.reward_window_size:])
+                recent_reward_avg = np.mean(self.history["reward"])
                 if recent_reward_avg > self.best_reward:
                     self.best_reward = recent_reward_avg
                     best_model_path = os.path.join(path, "best_model.pth")
                     self.agent.save_weights(best_model_path)
+                    self.test(os.path.join(path, "video"), num_episodes=1)
                     logger.info(f"New best model saved! Average reward: {recent_reward_avg:.2f}")
+
+                    all_rewards_dict = {}
+                    for key, value in infos["reward_dict"].items():
+                        if key.startswith("_"):
+                            continue
+                        if key not in all_rewards_dict:
+                            all_rewards_dict[key] = []
+                        all_rewards_dict[key].extend(value if isinstance(value, list) else [value])
+                    
+                    for key, values in all_rewards_dict.items():
+                        logger.info(f"> {key}: {np.mean(values):.4f}")
 
             if total_frames % self.save_freq == 0:
                 checkpoint_path = os.path.join(path, f"checkpoint.pth")
                 self.agent.save_weights(checkpoint_path)
-                logger.info(f"Checkpoint saved at frame {total_frames}")
+                if self.verbose:
+                    logger.info(f"Checkpoint saved at frame {total_frames}")
 
             state = next_state
 
-            pbar.set_postfix(reward=np.mean(self.history["reward"][-10:]) if self.history["reward"] else 0, 
-                           loss=np.mean(self.history["loss"][-10:]) if self.history["loss"] else 0, 
-                           epsilon=epsilon)
+            q_val_mean = np.mean(q_values) if len(q_values) > 0 else 0.0
+            q_val_std = np.std(q_values) if len(q_values) > 0 else 0.0
+            pbar_rewards = np.mean(self.history['reward']) if len(self.history["reward"]) > 0 else 0.0
+            pbar_loss = np.mean(self.history['loss']) if len(self.history["reward"]) > 0 else 0.0
+            pbar.set_postfix(
+                reward=f"{pbar_rewards:.4f}", 
+                loss=f"{pbar_loss:.4f}", 
+                epsilon=f"{epsilon:.4f}",
+                q_values=f"{q_val_mean:.4f}",
+                q_values_std=f"{q_val_std:.4f}"
+            )
 
         pbar.close()
         logger.info("Training completed. Saving final model weights...")
@@ -164,11 +196,11 @@ class TetrisEnv():
         import cv2
         os.makedirs(path, exist_ok=True)
         
-        self.env = self._make_env(render_mode="rgb_array")
+        env = self._make_env(render_mode="rgb_array")
         self.agent.model.eval()
 
-        state, _ = self.env.reset()
-        frame = self.env.render()
+        state, _ = env.reset()
+        frame = env.render()
         height, width, _ = frame.shape
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -179,29 +211,34 @@ class TetrisEnv():
         total_steps = 0
 
         for i in range(num_episodes):
-            state, _ = self.env.reset()
+            state, _ = env.reset()
             done = False
             rewards = 0
             steps = 0
             while not done:
-                frame = self.env.render()
+                frame = env.render()
                 video.write(frame)
-                state, reward, terminated, truncated, _ = self.env.step(self.agent.select_action(state, 0.0))
+                action, _ = self.agent.select_action(state, 0.0)
+                state, reward, terminated, truncated, _ = env.step(action)
                 done = terminated or truncated
                 rewards += reward
                 steps += 1
 
-            logger.info(f"Episode {i + 1} - Reward: {rewards:.2f} - Steps: {steps}")
+            if self.verbose:
+                logger.info(f"Episode {i + 1} - Reward: {rewards:.2f} - Steps: {steps}")
             total_rewards += rewards    
             total_steps += steps
 
         avg_reward = total_rewards / num_episodes
         avg_steps = total_steps / num_episodes
 
-        logger.info(f"Average reward: {avg_reward:.2f} - Average steps: {avg_steps:.2f}")
+        if self.verbose:
+            logger.info(f"Average reward: {avg_reward:.2f} - Average steps: {avg_steps:.2f}")
 
         video.release()
-        logger.info(f"Video saved to: {video_path}")
+        if self.verbose:
+            logger.info(f"Video saved to: {video_path}")
+        del env
 
     def close(self):
         self.env.close() 
