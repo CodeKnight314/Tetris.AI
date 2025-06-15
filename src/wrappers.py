@@ -58,13 +58,14 @@ class ShapedRewardWrapper(gym.Wrapper):
         if raw is None:
             raise RuntimeError("Could not find `raw_board` in any wrapper.")
 
-        shaped_only = self.reward_shaper.calculate_rewards(raw)
+        shaped_only, reward_dict = self.reward_shaper.calculate_rewards(raw, terminated)
 
         combined = original_reward + shaped_only
 
         info["original_reward"] = original_reward
         info["shaped_reward"]   = shaped_only
         info["combined_reward"] = combined
+        info["reward_dict"] = reward_dict
 
         return obs, combined, terminated, truncated, info
 
