@@ -11,7 +11,7 @@ class RewardShaping():
     def extract_features(self, board: np.array, terminated: bool):
         height, width = board.shape
 
-        lines_cleared = self.calculate_lines_cleared(board) / 4.0
+        lines_cleared = self.calculate_lines_cleared(board)
         holes = self.calculate_holes(board) / (height * width)
         aggregate_height, bumpiness, max_height = self.calculate_height(board)
 
