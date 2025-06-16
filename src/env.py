@@ -2,10 +2,10 @@ import os
 import torch
 import numpy as np
 import gymnasium as gym
-from gymnasium.wrappers import FrameStackObservation, ResizeObservation, RecordVideo
+from gymnasium.wrappers import FrameStackObservation, ResizeObservation
 from tqdm import tqdm
 from src.agent import TetrisAgent
-from src.wrappers import MaxAndSkipEnv, TetrisPreprocessor, ShapedRewardWrapper
+from src.wrappers import TetrisPreprocessor, ShapedRewardWrapper
 from src.reward_shaper import RewardShaping
 import yaml
 import logging
@@ -21,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class TetrisEnv(): 
-    def __init__(self, seed: int, num_envs: int, config: str, weights: str = None, verbose: bool = False):
+    def __init__(self, seed: int, num_envs: int, config: str, weights: str = None, verbose: bool = True):
         logger.info(f"Initializing Tetris environment with {num_envs} parallel environments")
         with open(config, 'r') as f: 
             self.config = yaml.safe_load(f)
@@ -29,6 +29,7 @@ class TetrisEnv():
         self.seed = seed
         self.num_envs = num_envs
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.buffer_type = self.config["buffer_type"]
         logger.info(f"Using device: {self.device}")
 
         self.set_seed(seed)
@@ -54,7 +55,8 @@ class TetrisEnv():
                                  self.config["gamma"], 
                                  self.config["max_memory"], 
                                  self.config["max_gradient"], 
-                                 self.config["action_mask"])
+                                 self.config["action_mask"], 
+                                 self.buffer_type)
         
         if weights is not None: 
             logger.info(f"Loading pre-trained weights from: {weights}")
@@ -106,6 +108,7 @@ class TetrisEnv():
 
         while total_frames < self.max_frames:
             epsilon = max(self.epsilon_min, self.epsilon * (self.epsilon_decay ** (total_frames / 1000)))
+
             actions = []
             q_values = []
             for i in range(self.num_envs):
@@ -136,16 +139,23 @@ class TetrisEnv():
                     self.history["reward"].append(float(episode_rewards[i]))
                     episode_rewards[i] = 0.0
 
+                total_frames += 1
+
+                if total_frames % self.update_freq == 0:
+                    self.agent.update_target_network(hard_update=True)
+                    logger.info(f"Target network updated at frame {total_frames}")
+
+                if total_frames % self.save_freq == 0:
+                    checkpoint_path = os.path.join(path, f"checkpoint.pth")
+                    self.agent.save_weights(checkpoint_path)
+                    if self.verbose:
+                        logger.info(f"Checkpoint saved at frame {total_frames}")
+
+            pbar.update(self.num_envs)
+
             if len(self.agent.buffer) > self.batch_size:
                 loss = self.agent.update(self.batch_size)
                 self.history["loss"].append(loss)
-
-            total_frames += self.num_envs
-            pbar.update(self.num_envs)
-
-            if total_frames % self.update_freq == 0:
-                self.agent.update_target_network(hard_update=True)
-                logger.info(f"Target network updated at frame {total_frames}")
 
             if len(self.history["reward"]) >= self.reward_window_size:
                 recent_reward_avg = np.mean(self.history["reward"])
@@ -167,12 +177,6 @@ class TetrisEnv():
                     for key, values in all_rewards_dict.items():
                         logger.info(f"> {key}: {np.mean(values):.4f}")
 
-            if total_frames % self.save_freq == 0:
-                checkpoint_path = os.path.join(path, f"checkpoint.pth")
-                self.agent.save_weights(checkpoint_path)
-                if self.verbose:
-                    logger.info(f"Checkpoint saved at frame {total_frames}")
-
             state = next_state
 
             q_val_mean = np.mean(q_values) if len(q_values) > 0 else 0.0
@@ -183,6 +187,7 @@ class TetrisEnv():
                 reward=f"{pbar_rewards:.4f}", 
                 loss=f"{pbar_loss:.4f}", 
                 epsilon=f"{epsilon:.4f}",
+                beta=f"{self.agent.beta:.4f}",
                 q_values=f"{q_val_mean:.4f}",
                 q_values_std=f"{q_val_std:.4f}"
             )
