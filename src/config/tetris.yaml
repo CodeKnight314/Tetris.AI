@@ -12,5 +12,6 @@ save_freq: 10000
 max_frames: 20000000
 window_size: 100
 # reward_weights: [lines_cleared, holes, bumpiness, aggregate_height, max_height, tetris_bonus, survival_bonus, line_progress, low_placement]
-reward_weights: [2.5, 2.0, 0.3, 0.2, 0.5, 4.0, 1.0, 0.0, 0.0]
+reward_weights: [2.5, 2.0, 0.3, 0.2, 0.5, 4.0, 0.001, 0.0, 0.0]
 action_mask: [5, 6]
+buffer_type: "prioritized"
