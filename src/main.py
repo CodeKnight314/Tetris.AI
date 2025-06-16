@@ -3,7 +3,7 @@ import argparse
 
 def main(args):
     try: 
-        env = TetrisEnv(args.seed, args.num_envs, args.c, args.w)
+        env = TetrisEnv(args.seed, args.num_envs, args.c, args.w, args.verbose)
         if args.mode == "train":
             env.train(args.o)
         else: 
@@ -21,6 +21,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["train", "test"], default="train", help="Mode to test/train Tetris Agent")
     parser.add_argument("--num_envs", type=int, help="Number of parallel environments to run at the same time")
     parser.add_argument("--num_episodes", type=int, help="Number of episodes to run for testing")
+    parser.add_argument("--verbose", action="store_true", help="Render the Tetris game")
     args = parser.parse_args()
     
     main(args)
