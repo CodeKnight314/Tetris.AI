@@ -101,8 +101,6 @@ class RewardShaping():
         
     def calculate_rewards(self, board: np.array, terminated: bool):
         features, reward_dict = self.extract_features(board, terminated)
-        if features[0] != 0:
-            logger.info(f"Lines Cleared: {features[0]}")
         reward_sum = np.dot(self.weights, features)
         reward_dict["sum"] = reward_sum
         return reward_sum, reward_dict
