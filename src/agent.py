@@ -31,13 +31,13 @@ class TetrisAgent:
         
         self.opt = AdamW(params=self.model.parameters(), lr=lr)
         
-        self.criterion = nn.MSELoss(reduction="none") # Double check this later
+        self.criterion = nn.MSELoss(reduction="none")
         self.gamma = gamma
         self.action_dim = ac_dim
         self.max_grad = max_gradient
-        self.beta_start = 0.4
+        self.beta_start = 0.5
         self.beta = self.beta_start
-        self.beta_frames = 1000000
+        self.beta_frames = 10000
         self.training_step = 0
 
         self.update_target_network(True)
