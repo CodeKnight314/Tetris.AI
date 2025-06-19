@@ -99,6 +99,7 @@ class TetrisEnv():
         os.makedirs(path, exist_ok=True)
 
         total_frames = 0
+        total_lines_cleared = 0
 
         episode_rewards = np.zeros(self.num_envs, dtype=float)
 
@@ -121,9 +122,11 @@ class TetrisEnv():
                 else: 
                     a_i = output
                     actions.append(int(a_i))
+                    
             actions = np.array(actions, dtype=np.int32)
 
             next_state, rewards, terminateds, truncateds, infos = self.env.step(actions)
+            total_lines_cleared += sum(infos["reward_dict"]["lines_cleared"])
             dones = np.logical_or(terminateds, truncateds)
 
             for i in range(self.num_envs):
@@ -143,7 +146,8 @@ class TetrisEnv():
 
                 if total_frames % self.update_freq == 0:
                     self.agent.update_target_network(hard_update=True)
-                    logger.info(f"Target network updated at frame {total_frames}")
+                    if self.verbose:
+                        logger.info(f"Target network updated at frame {total_frames}")
 
                 if total_frames % self.save_freq == 0:
                     checkpoint_path = os.path.join(path, f"checkpoint.pth")
@@ -164,18 +168,19 @@ class TetrisEnv():
                     best_model_path = os.path.join(path, "best_model.pth")
                     self.agent.save_weights(best_model_path)
                     self.test(os.path.join(path, "video"), num_episodes=1)
-                    logger.info(f"New best model saved! Average reward: {recent_reward_avg:.2f}")
 
-                    all_rewards_dict = {}
-                    for key, value in infos["reward_dict"].items():
-                        if key.startswith("_"):
-                            continue
-                        if key not in all_rewards_dict:
-                            all_rewards_dict[key] = []
-                        all_rewards_dict[key].extend(value if isinstance(value, list) else [value])
-                    
-                    for key, values in all_rewards_dict.items():
-                        logger.info(f"> {key}: {np.mean(values):.4f}")
+                    if self.verbose:
+                        logger.info(f"New best model saved! Average reward: {recent_reward_avg:.2f}")
+                        all_rewards_dict = {}
+                        for key, value in infos["reward_dict"].items():
+                            if key.startswith("_"):
+                                continue
+                            if key not in all_rewards_dict:
+                                all_rewards_dict[key] = []
+                            all_rewards_dict[key].extend(value if isinstance(value, list) else [value])
+                        
+                        for key, values in all_rewards_dict.items():
+                            logger.info(f"> {key}: {np.mean(values):.4f}")
 
             state = next_state
 
@@ -189,13 +194,16 @@ class TetrisEnv():
                 epsilon=f"{epsilon:.4f}",
                 beta=f"{self.agent.beta:.4f}",
                 q_values=f"{q_val_mean:.4f}",
-                q_values_std=f"{q_val_std:.4f}"
+                q_values_std=f"{q_val_std:.4f}",
+                lines_cleared=f"{total_lines_cleared}"
             )
 
         pbar.close()
         logger.info("Training completed. Saving final model weights...")
         self.agent.save_weights(os.path.join(path, "final_model.pth"))
         logger.info(f"Final model weights saved to: {os.path.join(path, 'final_model.pth')}")
+        
+        return total_lines_cleared
 
     def test(self, path: str, num_episodes: int):
         import cv2
