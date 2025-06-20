@@ -1,5 +1,6 @@
 frame_stack: 1
-lr: 0.0005
+lr: 0.005
+min_lr: 0.0001
 gamma: 0.995
 max_memory: 25000
 max_gradient: 1.0
@@ -7,11 +8,14 @@ epsilon: 1.0
 epsilon_min: 0.01
 epsilon_decay: 0.9995
 batch_size: 512
-update_freq: 10000
+update_freq: 5000
 save_freq: 10000
 max_frames: 20000000
 window_size: 100
 # reward_weights: [lines_cleared, holes, bumpiness, aggregate_height, max_height, tetris_bonus, survival_bonus, line_progress, low_placement]
-reward_weights: [250, 2.0, 1.0, 1.0, 1.0, 400.0, 0.001, 0.0, 0.0]
+reward_weights: [1.5, 1.9, 2.0, 0.85, 0.01, 0.23, 0.001, 0.0, 0.0]
 action_mask: [5, 6]
 buffer_type: "prioritized"
+scheduler_max: 100000
+beta_start: 0.5
+beta_frames: 10000
