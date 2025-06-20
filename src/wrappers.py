@@ -15,7 +15,7 @@ class TetrisPreprocessor(gym.Wrapper):
         self.observation_space = spaces.Box(
             low=0,
             high=255,
-            shape=board_space.shape,
+            shape=(self.coord[3] - self.coord[1] + 1, self.coord[2] - self.coord[0] + 1),
             dtype=np.uint8
         )
 
