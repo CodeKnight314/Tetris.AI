@@ -20,7 +20,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=1898, help="Seed for experiment reproduciability")
     parser.add_argument("--mode", choices=["train", "test"], default="train", help="Mode to test/train Tetris Agent")
     parser.add_argument("--num_envs", type=int, help="Number of parallel environments to run at the same time")
-    parser.add_argument("--num_episodes", type=int, help="Number of episodes to run for testing")
+    parser.add_argument("--num_episodes", type=int, default=1, help="Number of episodes to run for testing")
     parser.add_argument("--verbose", action="store_true", help="Render the Tetris game")
     args = parser.parse_args()
     
