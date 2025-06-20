@@ -2,10 +2,10 @@ import torch
 import torch.nn as nn 
 
 class TetrisAI(nn.Module):
-    def __init__(self, num_frames: int, action_space: int):
+    def __init__(self, num_frames: int, action_space: int, num_features: int = 4):
         super().__init__()
         
-        self.features = nn.Sequential(
+        self.cnn = nn.Sequential(
             nn.Conv2d(num_frames, 32, kernel_size=8, stride=4, padding=2), 
             nn.ReLU(), 
             nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1), 
@@ -18,14 +18,21 @@ class TetrisAI(nn.Module):
         
         feature_size = 64 * 7 * 7
         
+        self.feature_mcp = nn.Sequential(
+            nn.Linear(num_features, 32), 
+            nn.ReLU(),
+            nn.Linear(32, 16),
+            nn.ReLU()
+        )
+        
         self.value_stream = nn.Sequential(
-            nn.Linear(feature_size, 512), 
+            nn.Linear(feature_size + 16, 512), 
             nn.ReLU(), 
             nn.Linear(512, 1)
         )
         
         self.advantage_stream = nn.Sequential(
-            nn.Linear(feature_size, 512), 
+            nn.Linear(feature_size + 16, 512), 
             nn.ReLU(), 
             nn.Linear(512, action_space)
         )
@@ -39,16 +46,20 @@ class TetrisAI(nn.Module):
         elif isinstance(module, nn.Conv2d):
             torch.nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
         
-    def forward(self, x: torch.Tensor, normalize: bool = False):
+    def forward(self, x: torch.Tensor, features: torch.Tensor, normalize: bool = False):
         if normalize: 
             x = x / 255.0
         
         if len(x.shape) == 3:
             x = x.unsqueeze(0)
             
-        features = self.features(x)
-        value = self.value_stream(features)
-        advantage = self.advantage_stream(features)
+        board_embeddings = self.cnn(x)
+        feature_embeddings = self.feature_mcp(features)
+        
+        combined = torch.cat([board_embeddings, feature_embeddings], dim=1)
+        
+        value = self.value_stream(combined)
+        advantage = self.advantage_stream(combined)
         
         Q_values = value + (advantage - advantage.mean(dim=1, keepdim=True))
         return Q_values
