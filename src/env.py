@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 import gymnasium as gym
-from gymnasium.wrappers import FrameStackObservation, ResizeObservation
+from gymnasium.wrappers import FrameStackObservation
 from tqdm import tqdm
 from src.agent import TetrisAgent
 from src.wrappers import TetrisPreprocessor, ShapedRewardWrapper
@@ -52,11 +52,15 @@ class TetrisEnv():
         self.agent = TetrisAgent(self.config["frame_stack"], 
                                  self.env.action_space[0].n, 
                                  self.config["lr"], 
+                                 self.config["min_lr"],
                                  self.config["gamma"], 
                                  self.config["max_memory"], 
                                  self.config["max_gradient"], 
                                  self.config["action_mask"], 
-                                 self.buffer_type)
+                                 self.buffer_type,
+                                 self.config["scheduler_max"],
+                                 self.config["beta_start"], 
+                                 self.config["beta_frames"])
         
         if weights is not None: 
             logger.info(f"Loading pre-trained weights from: {weights}")
@@ -89,11 +93,11 @@ class TetrisEnv():
     def _make_env(self, render_mode: str = None):
         env = gym.make("tetris_gymnasium/Tetris", render_mode=render_mode)
         env = TetrisPreprocessor(env)
-        env = ResizeObservation(env, (84, 84))
         env = ShapedRewardWrapper(env, self.reward_shaper)
         env = FrameStackObservation(env, stack_size=int(self.config["frame_stack"]))
+    
         return env
-
+        
     def train(self, path: str):
         logger.info(f"Starting training process. Model will be saved to: {path}")
         os.makedirs(path, exist_ok=True)
@@ -111,17 +115,10 @@ class TetrisEnv():
             epsilon = max(self.epsilon_min, self.epsilon * (self.epsilon_decay ** (total_frames / 1000)))
 
             actions = []
-            q_values = []
             for i in range(self.num_envs):
                 single_board = state[i]
-                output = self.agent.select_action(single_board, epsilon)
-                if isinstance(output, tuple):
-                    a_i, q_value = output
-                    actions.append(int(a_i))
-                    q_values.append(q_value)
-                else: 
-                    a_i = output
-                    actions.append(int(a_i))
+                a_i = self.agent.select_action(single_board, epsilon)
+                actions.append(int(a_i))
                     
             actions = np.array(actions, dtype=np.int32)
 
@@ -132,10 +129,18 @@ class TetrisEnv():
             for i in range(self.num_envs):
                 prev_board = torch.tensor(state[i]).float()
                 next_board = torch.tensor(next_state[i]).float()
+                
+                features = torch.tensor(np.array([
+                    -infos["reward_dict"]["holes"][i],
+                    -infos["reward_dict"]["bumpiness"][i],
+                    -infos["reward_dict"]["aggregate_height"][i],
+                    -infos["reward_dict"]["max_height"][i]
+                ]))
+                
                 r_i = float(rewards[i])
                 d_i = bool(dones[i])
 
-                self.agent.push(prev_board, actions[i], r_i, next_board, d_i)
+                self.agent.push(prev_board, actions[i], r_i, next_board, d_i, features)
                 episode_rewards[i] += r_i
 
                 if d_i:
@@ -157,8 +162,12 @@ class TetrisEnv():
 
             pbar.update(self.num_envs)
 
+            q_value_mean = 0.0
+            q_value_std = 0.0
             if len(self.agent.buffer) > self.batch_size:
-                loss = self.agent.update(self.batch_size)
+                loss, mean, std = self.agent.update(self.batch_size)
+                q_value_mean = mean
+                q_value_std = std
                 self.history["loss"].append(loss)
 
             if len(self.history["reward"]) >= self.reward_window_size:
@@ -184,8 +193,6 @@ class TetrisEnv():
 
             state = next_state
 
-            q_val_mean = np.mean(q_values) if len(q_values) > 0 else 0.0
-            q_val_std = np.std(q_values) if len(q_values) > 0 else 0.0
             pbar_rewards = np.mean(self.history['reward']) if len(self.history["reward"]) > 0 else 0.0
             pbar_loss = np.mean(self.history['loss']) if len(self.history["reward"]) > 0 else 0.0
             pbar.set_postfix(
@@ -193,8 +200,8 @@ class TetrisEnv():
                 loss=f"{pbar_loss:.4f}", 
                 epsilon=f"{epsilon:.4f}",
                 beta=f"{self.agent.beta:.4f}",
-                q_values=f"{q_val_mean:.4f}",
-                q_values_std=f"{q_val_std:.4f}",
+                q_values=f"{q_value_mean:.4f}",
+                q_values_std=f"{q_value_std:.4f}",
                 lines_cleared=f"{total_lines_cleared}"
             )
 
@@ -209,6 +216,17 @@ class TetrisEnv():
         import cv2
         os.makedirs(path, exist_ok=True)
         
+        action_labels = {
+            0: "move_left",
+            1: "move_right",
+            2: "move_down",
+            3: "rotate_cw",
+            4: "rotate_ccw",
+            5: "hard_drop",
+            6: "swap",
+            7: "noop"
+        }
+
         env = self._make_env(render_mode="rgb_array")
         self.agent.model.eval()
 
@@ -228,10 +246,26 @@ class TetrisEnv():
             done = False
             rewards = 0
             steps = 0
+            
             while not done:
                 frame = env.render()
+
+                action = self.agent.select_action(state, 0.0)
+                action_str = action_labels[int(action)]
+
+                text = f"Action: {action_str}"
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.6
+                thickness = 2
+                color = (0, 0, 255)
+                text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
+                text_x = frame.shape[1] - text_size[0] - 10
+                text_y = frame.shape[0] - 10
+
+                cv2.putText(frame, text, (text_x, text_y), font, font_scale, color, thickness, cv2.LINE_AA)
+
                 video.write(frame)
-                action, _ = self.agent.select_action(state, 0.0)
+
                 state, reward, terminated, truncated, _ = env.step(action)
                 done = terminated or truncated
                 rewards += reward
@@ -239,6 +273,7 @@ class TetrisEnv():
 
             if self.verbose:
                 logger.info(f"Episode {i + 1} - Reward: {rewards:.2f} - Steps: {steps}")
+                
             total_rewards += rewards    
             total_steps += steps
 
