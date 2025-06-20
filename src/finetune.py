@@ -23,15 +23,15 @@ def create_trial_config(trial_number: int, weights: List[float], base_config_pat
     
 def objective(trial):
     weights = [
-        trial.suggest_float('lines_cleared', 1, 10),
-        trial.suggest_float('holes', -10, -1),
-        trial.suggest_float('bumpiness', -10, -1),
-        trial.suggest_float('aggregate_height', -10, -1),
-        trial.suggest_float('max_height', -10, -1),
-        trial.suggest_float('tetris_bonus', 4, 10),
-        trial.suggest_float('survival_bonus', 0, 1),
-        trial.suggest_float('line_progress', 0, 5),
-        trial.suggest_float('low_placement', 0, 5)
+        trial.suggest_float('lines_cleared', 0.0, 5.0),
+        trial.suggest_float('holes', 0.0, 5.0),
+        trial.suggest_float('bumpiness', 0.0, 5.0),
+        trial.suggest_float('aggregate_height', 0.0, 5.0),
+        trial.suggest_float('max_height', 0.0, 5.0),
+        trial.suggest_float('tetris_bonus', 0.0, 5.0),
+        trial.suggest_float('survival_bonus', 0.0, 5.0),
+        trial.suggest_float('line_progress', 0.0, 5.0),
+        trial.suggest_float('low_placement', 0.0, 5.0)
     ]
     
     base_config = "src/config/finetune.yaml"
@@ -44,6 +44,7 @@ def objective(trial):
         
         env = TetrisEnv(seed=1898, num_envs=128, config=trial_config_path, verbose=False)
         lines_cleared = env.train(path=trial_dir)
+        env.test(path=trial_dir)
         
         results = {
             'trial_number': trial.number,
