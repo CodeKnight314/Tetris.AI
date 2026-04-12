@@ -5,6 +5,7 @@ import gymnasium as gym
 from gymnasium.wrappers import FrameStackObservation
 from tqdm import tqdm
 from src.agent import TetrisAgent
+from src.buffer import NStepBuffer
 from src.wrappers import TetrisPreprocessor, ShapedRewardWrapper
 from src.reward_shaper import RewardShaping
 import yaml
@@ -49,18 +50,23 @@ class TetrisEnv():
         logger.info(f"- Weights: {self.config['reward_weights']}")
         logger.info(f"- Action Space: {self.env.action_space[0].n}")
         
-        self.agent = TetrisAgent(self.config["frame_stack"], 
-                                 self.env.action_space[0].n, 
-                                 self.config["lr"], 
+        self.agent = TetrisAgent(self.config["frame_stack"],
+                                 self.env.action_space[0].n,
+                                 self.config["lr"],
                                  self.config["min_lr"],
-                                 self.config["gamma"], 
-                                 self.config["max_memory"], 
-                                 self.config["max_gradient"], 
-                                 self.config["action_mask"], 
+                                 self.config["gamma"],
+                                 self.config["max_memory"],
+                                 self.config["max_gradient"],
+                                 self.config["action_mask"],
                                  self.buffer_type,
                                  self.config["scheduler_max"],
-                                 self.config["beta_start"], 
-                                 self.config["beta_frames"])
+                                 self.config["beta_start"],
+                                 self.config["beta_frames"],
+                                 self.config.get("n_step", 1))
+
+        self.n_step = self.config.get("n_step", 1)
+        self.replay_ratio = self.config.get("replay_ratio", 1)
+        self.nstep_buffers = [NStepBuffer(self.n_step, self.config["gamma"]) for _ in range(num_envs)]
         
         if weights is not None: 
             logger.info(f"Loading pre-trained weights from: {weights}")
@@ -129,18 +135,17 @@ class TetrisEnv():
             for i in range(self.num_envs):
                 prev_board = torch.tensor(state[i]).float()
                 next_board = torch.tensor(next_state[i]).float()
-                
-                features = torch.tensor(np.array([
-                    -infos["reward_dict"]["holes"][i],
-                    -infos["reward_dict"]["bumpiness"][i],
-                    -infos["reward_dict"]["aggregate_height"][i],
-                    -infos["reward_dict"]["max_height"][i]
-                ]))
-                
+
+                features = self.agent.compute_features(state[i][-1])
+                next_features = self.agent.compute_features(next_state[i][-1])
+
                 r_i = float(rewards[i])
                 d_i = bool(dones[i])
 
-                self.agent.push(prev_board, actions[i], r_i, next_board, d_i, features)
+                for transition in self.nstep_buffers[i].push(
+                    prev_board, actions[i], r_i, next_board, d_i, features, next_features
+                ):
+                    self.agent.push(*transition)
                 episode_rewards[i] += r_i
 
                 if d_i:
@@ -165,10 +170,13 @@ class TetrisEnv():
             q_value_mean = 0.0
             q_value_std = 0.0
             if len(self.agent.buffer) > self.batch_size:
-                loss, mean, std = self.agent.update(self.batch_size)
+                total_loss = 0.0
+                for _ in range(self.replay_ratio):
+                    loss, mean, std = self.agent.update(self.batch_size)
+                    total_loss += loss
                 q_value_mean = mean
                 q_value_std = std
-                self.history["loss"].append(loss)
+                self.history["loss"].append(total_loss / self.replay_ratio)
 
             if len(self.history["reward"]) >= self.reward_window_size:
                 recent_reward_avg = np.mean(self.history["reward"])
@@ -212,7 +220,7 @@ class TetrisEnv():
         
         return total_lines_cleared
 
-    def test(self, path: str, num_episodes: int):
+    def test(self, path: str, num_episodes: int = 1):
         import cv2
         os.makedirs(path, exist_ok=True)
         

@@ -1,7 +1,8 @@
 frame_stack: 1
-lr: 0.0005
+lr: 0.0003
+min_lr: 0.00001
 gamma: 0.995
-max_memory: 10000
+max_memory: 50000
 max_gradient: 1.0
 epsilon: 1.0
 epsilon_min: 0.01
@@ -15,3 +16,8 @@ window_size: 100
 reward_weights: [250, 2.0, 1.0, 1.0, 1.0, 400.0, 0.001, 0.0, 0.0]
 action_mask: [5, 6]
 buffer_type: "prioritized"
+scheduler_max: 10000
+beta_start: 0.5
+beta_frames: 5000
+n_step: 3
+replay_ratio: 4

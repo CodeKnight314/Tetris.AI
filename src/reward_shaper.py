@@ -37,17 +37,17 @@ class RewardShaping():
             "low_placement": low_placement
         }
 
-        return np.clip(np.array([
+        return np.array([
             lines_cleared,
             -holes,
-            -bumpiness, 
+            -bumpiness,
             -aggregate_height,
-            -max_height, 
-            tetris_bonus, 
+            -max_height,
+            tetris_bonus,
             survival_bonus,
             line_progress,
             low_placement
-        ]), -1.0, 1.0), reward_dict
+        ]), reward_dict
     
     def calculate_line_progress(self, board: np.array):
         progress = 0
@@ -120,14 +120,16 @@ class RewardShaping():
             if (row, col) in visited or row < 0 or row >= height or col < 0 or col >= width:
                 continue
             
-            if board[row, col] != 255: 
-                continue 
-            
-            for dir in directions: 
-                delta_y, delta_x = dir 
+            if board[row, col] != 255:
+                continue
+
+            visited.add((row, col))
+
+            for dir in directions:
+                delta_y, delta_x = dir
                 new_row = delta_y + row
                 new_col = delta_x + col
-                if (new_row, new_col) not in visited: 
+                if (new_row, new_col) not in visited:
                     stack.append((new_row, new_col))
                     
         return False
