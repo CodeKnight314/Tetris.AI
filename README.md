@@ -6,7 +6,7 @@
 
 > Trained agent playing Tetris up to 10,000 placed pieces, clearing 4000 lines
 
-Tetris-playing agent optimized via the **Noisy Cross-Entropy Method (CEM)**, replicating [Szita & Lőrincz (2006)](https://doi.org/10.1162/neco.2006.18.12.2936). A linear evaluation function scores board states using 22 Bertsekas & Tsitsiklis features, and CEM evolves the weight vector to maximize lines cleared.
+Tetris-playing agent optimized via the **Noisy Cross-Entropy Method (CEM)**, replicating [Szita & Lőrincz (2006)](https://doi.org/10.1162/neco.2006.18.12.2936). A linear evaluation function scores board states using 22 Bertsekas & Tsitsiklis features, and CEM evolves the weight vector to maximize lines cleared. Notably, CEM allows a strong Tetris agent to converge within ~20 minutes of training whil reaching a higher performance ceiling, compared to DQN based methods.
 
 ## Setup
 
