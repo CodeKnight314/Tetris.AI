@@ -1,9 +1,5 @@
-torch
 numpy
 gymnasium
-matplotlib
 tqdm
 pyyaml
 tetris-gymnasium
-pygame
-optuna

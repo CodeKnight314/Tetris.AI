@@ -1,175 +1,118 @@
 import gymnasium as gym
 import numpy as np
-from gymnasium.spaces import Box, Dict
-from typing import Tuple
-import cv2
-from src.reward_shaper import RewardShaping
-from gymnasium import spaces
+from src.placement import BOARD_HEIGHT, BOARD_WIDTH
 
-class TetrisPreprocessor(gym.Wrapper):
-    def __init__(self, env, coord: Tuple[int, int, int, int] = (4, 0, 13, 19)):
+
+class PlacementEnv(gym.Wrapper):
+    """Wraps tetris_gymnasium/Tetris for placement-based RL.
+
+    The underlying env should be created with gravity disabled.
+    """
+    def __init__(self, env):
         super().__init__(env)
-        self.coord = coord
-        board_space = env.observation_space.spaces["board"]
-        assert isinstance(board_space, spaces.Box), "expected board to be a Box"
-        self.observation_space = spaces.Box(
-            low=0,
-            high=255,
-            shape=(self.coord[3] - self.coord[1] + 1, self.coord[2] - self.coord[0] + 1),
-            dtype=np.uint8
-        )
+        self.tetris = env.unwrapped
+        assert not self.tetris.gravity_enabled, \
+            "PlacementEnv requires gravity=False. Create env with Tetris(gravity=False)."
+        self.padding = self.tetris.padding
 
-        self.raw_board = None
+    def get_board_binary(self) -> np.ndarray:
+        """Extract 20x10 binary board (without active piece).
 
-    def observation(self, obs: dict) -> np.ndarray:
-        board = obs["board"].astype(np.uint8)
-        binary = np.where(board == 0, 0, 255).astype(np.uint8)
-        binary = binary[self.coord[1]:self.coord[3]+1, self.coord[0]:self.coord[2]+1]
-        self.raw_board = binary
-        return binary
+        Returns uint8 array: 0=empty, 255=filled.
+        """
+        raw = self.tetris.board
+        cropped = raw[0:self.tetris.height, self.padding:self.padding + self.tetris.width]
+        return np.where(cropped == 0, 0, 255).astype(np.uint8)
 
-    def step(self, action):
-        obs, reward, term, trunc, info = self.env.step(action)
-        return self.observation(obs), reward, term, trunc, info
-
-    def reset(self, **kwargs):
-        obs, info = self.env.reset(**kwargs)
-        return self.observation(obs), info
-
-class ShapedRewardWrapper(gym.Wrapper):
-    def __init__(self, env: gym.Env, reward_shaper: RewardShaping):
-        super().__init__(env)
-        self.reward_shaper = reward_shaper
-
-    def step(self, action):
-        obs, original_reward, terminated, truncated, info = self.env.step(action)
-
-        raw = None
-        wrapper = self.env
-        while wrapper is not None:
-            if hasattr(wrapper, "raw_board") and wrapper.raw_board is not None:
-                raw = wrapper.raw_board
-                break
-            if hasattr(wrapper, "env"):
-                wrapper = wrapper.env
-            else:
-                wrapper = None
-
-        if raw is None:
-            raise RuntimeError("Could not find `raw_board` in any wrapper.")
-
-        shaped_only, reward_dict = self.reward_shaper.calculate_rewards(raw, terminated)
-
-        combined = original_reward + shaped_only
-
-        info["original_reward"] = original_reward
-        info["shaped_reward"]   = shaped_only
-        info["combined_reward"] = combined
-        info["reward_dict"] = reward_dict
-
-        return obs, combined, terminated, truncated, info
-
-    def reset(self, **kwargs):
-        return self.env.reset(**kwargs)
-
-class NoopResetEnv(gym.Wrapper):
-    def __init__(self, env, noop_max: int = 30):
-        super().__init__(env)
-        self.noop_max = noop_max  
-        self.noop_action = 0
-        assert env.unwrapped.get_action_meanings()[0] == "NOOP"
-        
-    def reset(self, **kwargs):
-        obs, info = self.env.reset(**kwargs)
-        noops = np.random.randint(1, self.noop_max + 1)
-        for _ in range(noops):
-            obs, _, done, _, info = self.env.step(self.noop_action)
-            if done: 
-                obs, info = self.env.reset(**kwargs)
-        return obs, info
-    
-class MaxAndSkipEnv(gym.Wrapper):
-    def __init__(self, env, skip=4):
-        super().__init__(env)
-        self._skip = skip
-
-        obs_space = env.observation_space
-        if isinstance(obs_space, Dict):
-            obs_shape = obs_space["board"].shape
-        elif isinstance(obs_space, Box):
-            obs_shape = obs_space.shape
+    def _to_piece_index(self, piece) -> int:
+        """Convert a tetromino object or raw ID to a 0-6 piece index."""
+        if hasattr(piece, 'id'):
+            # Tetromino object — ID is offset by base_pixels (empty + bedrock)
+            return int(piece.id) - len(self.tetris.base_pixels)
         else:
-            raise TypeError("Unsupported observation space type")
+            # Raw integer from queue — already 0-indexed
+            return int(piece)
 
-        self._obs_buffer = np.zeros((2,) + obs_shape, dtype=np.uint8)
+    def get_piece_id(self) -> int:
+        """Get current active piece index (0-6)."""
+        return self._to_piece_index(self.tetris.active_tetromino)
 
-    def step(self, action):
+    def get_hold_piece_id(self):
+        """Get held piece index (0-6) or None if hold is empty."""
+        held = self.tetris.holder.get_tetrominoes()
+        if len(held) == 0:
+            return None
+        return self._to_piece_index(held[0])
+
+    def get_next_piece_id(self) -> int:
+        """Peek at the next piece in queue (0-6)."""
+        queue = self.tetris.queue.get_queue()
+        return self._to_piece_index(queue[0])
+
+    def get_has_swapped(self) -> bool:
+        return self.tetris.has_swapped
+
+    def execute_placement(self, placement):
+        """Execute a placement using low-level actions.
+
+        Sequence: [swap] → rotate × N → move to column → hard_drop.
+        Gravity must be disabled for safe positioning.
+
+        Returns (obs, total_reward, terminated, truncated, info) from the final hard_drop.
+        """
         total_reward = 0.0
-        terminated = truncated = False
-        info = {}
-        for i in range(self._skip):
-            obs, reward, term, trunc, info = self.env.step(action)
-            if isinstance(obs, dict):
-                obs_frame = obs["board"]
-            else:
-                obs_frame = obs
 
-            if i == self._skip - 2: self._obs_buffer[0] = obs_frame
-            if i == self._skip - 1: self._obs_buffer[1] = obs_frame
+        # Hold swap if needed
+        if placement.use_hold:
+            obs, r, term, trunc, info = self.env.step(6)  # swap
+            total_reward += r
+            if term or trunc:
+                return obs, total_reward, term, trunc, info
 
-            total_reward += reward
-            terminated, truncated = term, trunc
-            if terminated or truncated:
+        # Rotate to target rotation
+        for _ in range(placement.rotation_idx):
+            obs, r, term, trunc, info = self.env.step(3)  # rotate_cw
+            total_reward += r
+            if term or trunc:
+                return obs, total_reward, term, trunc, info
+
+        # Compute column delta
+        current_col = self._get_current_left_col()
+        target_col = placement.column
+        delta = target_col - current_col
+
+        # Move to target column
+        if delta > 0:
+            for _ in range(delta):
+                obs, r, term, trunc, info = self.env.step(1)  # move_right
+                total_reward += r
+                if term or trunc:
+                    return obs, total_reward, term, trunc, info
+        elif delta < 0:
+            for _ in range(-delta):
+                obs, r, term, trunc, info = self.env.step(0)  # move_left
+                total_reward += r
+                if term or trunc:
+                    return obs, total_reward, term, trunc, info
+
+        # Hard drop
+        obs, r, term, trunc, info = self.env.step(5)  # hard_drop
+        total_reward += r
+
+        return obs, total_reward, term, trunc, info
+
+    def _get_current_left_col(self) -> int:
+        """Get the leftmost filled column of the active piece in 0-9 board coords."""
+        matrix = self.tetris.active_tetromino.matrix
+        # Find leftmost filled column in the piece matrix
+        left_offset = 0
+        for c in range(matrix.shape[1]):
+            if np.any(matrix[:, c] > 0):
+                left_offset = c
                 break
-
-        max_frame = self._obs_buffer.max(axis=0)
-        if isinstance(obs, dict):
-            obs["board"] = max_frame
-            return obs, total_reward, terminated, truncated, info
-        else:
-            return max_frame, total_reward, terminated, truncated, info
-
-
-class FireResetEnv(gym.Wrapper):
-    def __init__(self, env):
-        super().__init__(env)
-        action_meanings = env.unwrapped.get_action_meanings()
-        assert "FIRE" in action_meanings
-        self.fire_action = action_meanings.index("FIRE")
+        # Convert to board coords (unpadded)
+        return self.tetris.x + left_offset - self.padding
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
-        obs, _, terminated, truncated, info = self.env.step(self.fire_action)
-        if terminated or truncated:
-            obs, info = self.env.reset(**kwargs)
         return obs, info
-
-class EpisodicLifeEnv(gym.Wrapper):
-    def __init__(self, env):
-        super().__init__(env)
-        self.lives = 0
-        self.was_real_done = True
-
-    def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        self.was_real_done = terminated or truncated
-        lives = self.env.unwrapped.ale.lives()
-        if lives < self.lives and lives > 0:
-            terminated = True
-        self.lives = lives
-        return obs, reward, terminated, truncated, info
-
-    def reset(self, **kwargs):
-        if self.was_real_done:
-            obs, info = self.env.reset(**kwargs)
-        else:
-            obs, _, _, _, info = self.env.step(0)
-        self.lives = self.env.unwrapped.ale.lives()
-        return obs, info
-
-class ClipRewardEnv(gym.RewardWrapper):
-    def __init__(self, env):
-        super().__init__(env)
-
-    def reward(self, reward):
-        return np.sign(reward)

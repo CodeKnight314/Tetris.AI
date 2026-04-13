@@ -1,18 +1,16 @@
 import os
-import torch
 import numpy as np
-import gymnasium as gym
-from gymnasium.wrappers import FrameStackObservation
+from multiprocessing import Pool
 from tqdm import tqdm
-from src.agent import TetrisAgent
-from src.buffer import NStepBuffer
-from src.wrappers import TetrisPreprocessor, ShapedRewardWrapper
-from src.reward_shaper import RewardShaping
+from tetris_gymnasium.envs import Tetris
+from src.agent import LinearAgent
+from src.wrappers import PlacementEnv
+from src.placement import (
+    enumerate_placements, enumerate_placements_with_hold,
+    NUM_FEATURES,
+)
 import yaml
 import logging
-import matplotlib.pyplot as plt
-from tetris_gymnasium.envs import Tetris
-from collections import deque
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,294 +19,195 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class TetrisEnv(): 
-    def __init__(self, seed: int, num_envs: int, config: str, weights: str = None, verbose: bool = True):
-        logger.info(f"Initializing Tetris environment with {num_envs} parallel environments")
-        with open(config, 'r') as f: 
-            self.config = yaml.safe_load(f)
-        
-        self.seed = seed
-        self.num_envs = num_envs
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.buffer_type = self.config["buffer_type"]
-        logger.info(f"Using device: {self.device}")
 
-        self.set_seed(seed)
-        
-        self.reward_shaper = RewardShaping(self.config["reward_weights"])
-        
-        self.env = gym.vector.AsyncVectorEnv(
-            [lambda: self._make_env() for i in range(num_envs)], 
-            autoreset_mode=gym.vector.AutoresetMode.NEXT_STEP
-        )
-        
-        logger.info("Initializing TetrisAgent with configuration:")
-        logger.info(f"- Frame stack: {self.config['frame_stack']}")
-        logger.info(f"- Learning rate: {self.config['lr']}")
-        logger.info(f"- Gamma: {self.config['gamma']}")
-        logger.info(f"- Max memory: {self.config['max_memory']}")
-        logger.info(f"- Weights: {self.config['reward_weights']}")
-        logger.info(f"- Action Space: {self.env.action_space[0].n}")
-        
-        self.agent = TetrisAgent(self.config["frame_stack"],
-                                 self.env.action_space[0].n,
-                                 self.config["lr"],
-                                 self.config["min_lr"],
-                                 self.config["gamma"],
-                                 self.config["max_memory"],
-                                 self.config["max_gradient"],
-                                 self.config["action_mask"],
-                                 self.buffer_type,
-                                 self.config["scheduler_max"],
-                                 self.config["beta_start"],
-                                 self.config["beta_frames"],
-                                 self.config.get("n_step", 1))
+def play_game(weights, use_hold=True, lookahead=1, top_k=5, max_pieces=50000):
+    """Play one complete game and return lines cleared.
 
-        self.n_step = self.config.get("n_step", 1)
-        self.replay_ratio = self.config.get("replay_ratio", 1)
-        self.nstep_buffers = [NStepBuffer(self.n_step, self.config["gamma"]) for _ in range(num_envs)]
-        
-        if weights is not None: 
-            logger.info(f"Loading pre-trained weights from: {weights}")
-            self.agent.load_weights(weights)
+    Top-level function for multiprocessing compatibility.
+    """
+    agent = LinearAgent(weights)
+    env = PlacementEnv(Tetris(gravity=False))
+    env.reset()
+    board = env.get_board_binary()
 
-        self.history = {
-            "reward": deque(maxlen=self.config["window_size"] * 2),
-            "loss": deque(maxlen=self.config["window_size"] * 2),
-        }
-        
-        self.epsilon = self.config["epsilon"]
-        self.epsilon_min = self.config["epsilon_min"]
-        self.epsilon_decay = self.config["epsilon_decay"]
-        
-        self.max_frames = self.config["max_frames"]
-        self.batch_size = self.config["batch_size"]
-        self.update_freq = self.config["update_freq"]
-        self.reward_window_size = self.config["window_size"]
-        
-        self.best_reward = float('-inf')
-        self.save_freq = self.config["save_freq"]
-        self.verbose = verbose
-        
-        logger.info(f"Environment initialized with seed: {seed}")
-        
-    def set_seed(self, seed: int):
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-        
-    def _make_env(self, render_mode: str = None):
-        env = gym.make("tetris_gymnasium/Tetris", render_mode=render_mode)
-        env = TetrisPreprocessor(env)
-        env = ShapedRewardWrapper(env, self.reward_shaper)
-        env = FrameStackObservation(env, stack_size=int(self.config["frame_stack"]))
-    
-        return env
-        
-    def train(self, path: str):
-        logger.info(f"Starting training process. Model will be saved to: {path}")
-        os.makedirs(path, exist_ok=True)
+    total_lines = 0
+    pieces = 0
 
-        total_frames = 0
-        total_lines_cleared = 0
+    while pieces < max_pieces:
+        piece_id = env.get_piece_id()
 
-        episode_rewards = np.zeros(self.num_envs, dtype=float)
-
-        state, _ = self.env.reset()  
-
-        pbar = tqdm(total=self.max_frames, desc="Frames")
-
-        while total_frames < self.max_frames:
-            epsilon = max(self.epsilon_min, self.epsilon * (self.epsilon_decay ** (total_frames / 1000)))
-
-            actions = []
-            for i in range(self.num_envs):
-                single_board = state[i]
-                a_i = self.agent.select_action(single_board, epsilon)
-                actions.append(int(a_i))
-                    
-            actions = np.array(actions, dtype=np.int32)
-
-            next_state, rewards, terminateds, truncateds, infos = self.env.step(actions)
-            total_lines_cleared += sum(infos["reward_dict"]["lines_cleared"])
-            dones = np.logical_or(terminateds, truncateds)
-
-            for i in range(self.num_envs):
-                prev_board = torch.tensor(state[i]).float()
-                next_board = torch.tensor(next_state[i]).float()
-
-                features = self.agent.compute_features(state[i][-1])
-                next_features = self.agent.compute_features(next_state[i][-1])
-
-                r_i = float(rewards[i])
-                d_i = bool(dones[i])
-
-                for transition in self.nstep_buffers[i].push(
-                    prev_board, actions[i], r_i, next_board, d_i, features, next_features
-                ):
-                    self.agent.push(*transition)
-                episode_rewards[i] += r_i
-
-                if d_i:
-                    self.history["reward"].append(float(episode_rewards[i]))
-                    episode_rewards[i] = 0.0
-
-                total_frames += 1
-
-                if total_frames % self.update_freq == 0:
-                    self.agent.update_target_network(hard_update=True)
-                    if self.verbose:
-                        logger.info(f"Target network updated at frame {total_frames}")
-
-                if total_frames % self.save_freq == 0:
-                    checkpoint_path = os.path.join(path, f"checkpoint.pth")
-                    self.agent.save_weights(checkpoint_path)
-                    if self.verbose:
-                        logger.info(f"Checkpoint saved at frame {total_frames}")
-
-            pbar.update(self.num_envs)
-
-            q_value_mean = 0.0
-            q_value_std = 0.0
-            if len(self.agent.buffer) > self.batch_size:
-                total_loss = 0.0
-                for _ in range(self.replay_ratio):
-                    loss, mean, std = self.agent.update(self.batch_size)
-                    total_loss += loss
-                q_value_mean = mean
-                q_value_std = std
-                self.history["loss"].append(total_loss / self.replay_ratio)
-
-            if len(self.history["reward"]) >= self.reward_window_size:
-                recent_reward_avg = np.mean(self.history["reward"])
-                if recent_reward_avg > self.best_reward:
-                    self.best_reward = recent_reward_avg
-                    best_model_path = os.path.join(path, "best_model.pth")
-                    self.agent.save_weights(best_model_path)
-                    self.test(os.path.join(path, "video"), num_episodes=1)
-
-                    if self.verbose:
-                        logger.info(f"New best model saved! Average reward: {recent_reward_avg:.2f}")
-                        all_rewards_dict = {}
-                        for key, value in infos["reward_dict"].items():
-                            if key.startswith("_"):
-                                continue
-                            if key not in all_rewards_dict:
-                                all_rewards_dict[key] = []
-                            all_rewards_dict[key].extend(value if isinstance(value, list) else [value])
-                        
-                        for key, values in all_rewards_dict.items():
-                            logger.info(f"> {key}: {np.mean(values):.4f}")
-
-            state = next_state
-
-            pbar_rewards = np.mean(self.history['reward']) if len(self.history["reward"]) > 0 else 0.0
-            pbar_loss = np.mean(self.history['loss']) if len(self.history["reward"]) > 0 else 0.0
-            pbar.set_postfix(
-                reward=f"{pbar_rewards:.4f}", 
-                loss=f"{pbar_loss:.4f}", 
-                epsilon=f"{epsilon:.4f}",
-                beta=f"{self.agent.beta:.4f}",
-                q_values=f"{q_value_mean:.4f}",
-                q_values_std=f"{q_value_std:.4f}",
-                lines_cleared=f"{total_lines_cleared}"
+        if use_hold:
+            hold_id = env.get_hold_piece_id()
+            next_id = env.get_next_piece_id()
+            has_swapped = env.get_has_swapped()
+            placements = enumerate_placements_with_hold(
+                board, piece_id, hold_id, next_id, has_swapped
             )
+        else:
+            placements = enumerate_placements(board, piece_id)
 
-        pbar.close()
-        logger.info("Training completed. Saving final model weights...")
-        self.agent.save_weights(os.path.join(path, "final_model.pth"))
-        logger.info(f"Final model weights saved to: {os.path.join(path, 'final_model.pth')}")
-        
-        return total_lines_cleared
+        if not placements:
+            break
 
-    def test(self, path: str, num_episodes: int = 1):
-        import cv2
+        next_piece_id = env.get_next_piece_id() if lookahead >= 2 else None
+        idx = agent.select_placement(placements, next_piece_id, lookahead, top_k)
+        if idx is None:
+            break
+
+        placement = placements[idx]
+        _, _, terminated, truncated, _ = env.execute_placement(placement)
+
+        total_lines += placement.lines_cleared
+        pieces += 1
+
+        if terminated or truncated:
+            break
+
+        board = env.get_board_binary()
+
+    env.close()
+    return total_lines
+
+
+def evaluate_weights(args):
+    """Evaluate a weight vector by playing num_games games. For multiprocessing."""
+    weights, num_games, use_hold, lookahead, top_k = args
+    total = sum(play_game(weights, use_hold, lookahead, top_k)
+                for _ in range(num_games))
+    return total / num_games
+
+
+class CEMTrainer:
+    def __init__(self, config: str, verbose: bool = True):
+        logger.info("Initializing CEM Trainer")
+        with open(config, 'r') as f:
+            self.config = yaml.safe_load(f)
+
+        self.num_features = self.config.get("num_features", NUM_FEATURES)
+        self.population_size = self.config.get("population_size", 100)
+        self.elite_frac = self.config.get("elite_frac", 0.1)
+        self.elite_count = max(1, int(self.population_size * self.elite_frac))
+        self.num_games = self.config.get("num_games", 5)
+        self.num_generations = self.config.get("num_generations", 200)
+        self.noise_initial = self.config.get("noise_initial", 5.0)
+        self.noise_decay = self.config.get("noise_decay", 0.1)
+        self.initial_sigma = self.config.get("initial_sigma", 10.0)
+        self.num_workers = self.config.get("num_workers", 8)
+        self.use_hold = self.config.get("use_hold", True)
+        self.lookahead = self.config.get("lookahead", 1)
+        self.top_k = self.config.get("lookahead_top_k", 5)
+        self.verbose = verbose
+
+        # Initialize Gaussian distribution
+        self.mu = np.zeros(self.num_features)
+        self.sigma = np.ones(self.num_features) * self.initial_sigma
+
+        self.best_weights = None
+        self.best_score = 0
+
+        logger.info(f"CEM config: pop={self.population_size}, elite={self.elite_count}, "
+                     f"games={self.num_games}, gens={self.num_generations}, "
+                     f"noise={self.noise_initial}→0 (decay={self.noise_decay}/gen), "
+                     f"workers={self.num_workers}, "
+                     f"hold={self.use_hold}, lookahead={self.lookahead}")
+
+    def train(self, path: str):
+        logger.info(f"Starting CEM optimization. Results saved to: {path}")
         os.makedirs(path, exist_ok=True)
-        
-        action_labels = {
-            0: "move_left",
-            1: "move_right",
-            2: "move_down",
-            3: "rotate_cw",
-            4: "rotate_ccw",
-            5: "hard_drop",
-            6: "swap",
-            7: "noop"
-        }
 
-        env = self._make_env(render_mode="rgb_array")
-        self.agent.model.eval()
+        for gen in range(self.num_generations):
+            # Sample weight vectors from Gaussian
+            population = [np.random.normal(self.mu, self.sigma)
+                          for _ in range(self.population_size)]
 
-        state, _ = env.reset()
-        frame = env.render()
-        height, width, _ = frame.shape
+            # Evaluate in parallel
+            eval_args = [(w, self.num_games, self.use_hold, self.lookahead, self.top_k)
+                         for w in population]
 
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_path = os.path.join(path, "tetris.mp4")
-        video = cv2.VideoWriter(video_path, fourcc, 60, (width, height))
+            with Pool(self.num_workers) as pool:
+                scores = list(tqdm(
+                    pool.imap(evaluate_weights, eval_args),
+                    total=self.population_size,
+                    desc=f"Gen {gen+1}/{self.num_generations}",
+                    disable=not self.verbose,
+                ))
 
-        total_rewards = 0
-        total_steps = 0
+            scores = np.array(scores)
 
-        for i in range(num_episodes):
-            state, _ = env.reset()
-            done = False
-            rewards = 0
-            steps = 0
-            
-            while not done:
-                frame = env.render()
+            # Select elite
+            elite_idx = np.argsort(scores)[-self.elite_count:]
+            elite_weights = np.array([population[i] for i in elite_idx])
+            elite_scores = scores[elite_idx]
 
-                action = self.agent.select_action(state, 0.0)
-                action_str = action_labels[int(action)]
+            # Update distribution (noisy CEM with decaying noise per Szita & Lőrincz)
+            # Z_t = max(noise_initial - t * noise_decay, 0), added to variance
+            noise_t = max(self.noise_initial - gen * self.noise_decay, 0.0)
+            self.mu = np.mean(elite_weights, axis=0)
+            elite_var = np.var(elite_weights, axis=0)
+            self.sigma = np.sqrt(elite_var + noise_t)
 
-                text = f"Action: {action_str}"
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 0.6
-                thickness = 2
-                color = (0, 0, 255)
-                text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
-                text_x = frame.shape[1] - text_size[0] - 10
-                text_y = frame.shape[0] - 10
+            # Track best individual from this generation
+            gen_best_idx = np.argmax(scores)
+            gen_best = scores[gen_best_idx]
+            if gen_best > self.best_score:
+                self.best_score = gen_best
+                self.best_weights = population[gen_best_idx].copy()
+                np.save(os.path.join(path, "best_weights.npy"), self.best_weights)
 
-                cv2.putText(frame, text, (text_x, text_y), font, font_scale, color, thickness, cv2.LINE_AA)
+            # Evaluate μ over 30 games every 5 generations (paper Section 3)
+            # Parallelized across workers instead of sequential in 1 process
+            mu_score = None
+            if gen % 5 == 0 or gen == self.num_generations - 1:
+                eval_mu_args = [(self.mu, 1, self.use_hold, self.lookahead, self.top_k)
+                                for _ in range(30)]
+                with Pool(self.num_workers) as pool:
+                    mu_scores = pool.map(evaluate_weights, eval_mu_args)
+                mu_score = np.mean(mu_scores)
 
-                video.write(frame)
+            # Save checkpoint
+            np.save(os.path.join(path, "mu.npy"), self.mu)
+            np.save(os.path.join(path, "sigma.npy"), self.sigma)
 
-                state, reward, terminated, truncated, _ = env.step(action)
-                done = terminated or truncated
-                rewards += reward
-                steps += 1
+            mu_str = f", μ_eval(30games)={mu_score:.0f}" if mu_score is not None else ""
+            logger.info(
+                f"Gen {gen+1}: best={gen_best:.0f}, elite_avg={elite_scores.mean():.0f}, "
+                f"pop_avg={scores.mean():.0f}{mu_str}, "
+                f"noise_Z={noise_t:.2f}"
+            )
+            logger.info(f"  μ = {np.round(self.mu, 3).tolist()}")
+            logger.info(f"  σ = {np.round(self.sigma, 3).tolist()}")
 
+        # Save final
+        np.save(os.path.join(path, "final_weights.npy"), self.mu)
+        logger.info(f"CEM complete. Best score: {self.best_score:.0f} lines")
+        logger.info(f"Best weights: {np.round(self.best_weights, 4).tolist()}")
+
+        return self.best_score
+
+    def test(self, path: str, num_episodes: int = 10):
+        """Test the best weights."""
+        weights_path = os.path.join(path, "best_weights.npy")
+        if os.path.exists(weights_path):
+            weights = np.load(weights_path)
+        elif self.best_weights is not None:
+            weights = self.best_weights
+        else:
+            weights = self.mu
+
+        logger.info(f"Testing weights: {np.round(weights, 4).tolist()}")
+
+        results = []
+        for ep in range(num_episodes):
+            lines = play_game(weights, self.use_hold, self.lookahead, self.top_k)
+            results.append(lines)
             if self.verbose:
-                logger.info(f"Episode {i + 1} - Reward: {rewards:.2f} - Steps: {steps}")
-                
-            total_rewards += rewards    
-            total_steps += steps
+                logger.info(f"  Game {ep+1}: {lines} lines")
 
-        avg_reward = total_rewards / num_episodes
-        avg_steps = total_steps / num_episodes
-
-        if self.verbose:
-            logger.info(f"Average reward: {avg_reward:.2f} - Average steps: {avg_steps:.2f}")
-
-        video.release()
-        if self.verbose:
-            logger.info(f"Video saved to: {video_path}")
-        del env
+        avg = np.mean(results)
+        std = np.std(results)
+        logger.info(f"Test results: {avg:.0f} ± {std:.0f} lines "
+                     f"(min={min(results)}, max={max(results)})")
+        return avg
 
     def close(self):
-        self.env.close() 
-        del self.agent
-        torch.cuda.empty_cache()
-    
-    def save_weights(self, path: str):
-        os.makedirs(path, exist_ok=True)
-        self.agent.save_weights(path)
-
-    def plot_history(self, path: str):
-        plt.figure(figsize=(12, 6))
-        plt.plot(self.history["reward"], label="Reward")
-        plt.plot(self.history["loss"], label="Loss")
-        plt.legend()
-        plt.savefig(os.path.join(path, "history.png"))
-        plt.close()
+        pass

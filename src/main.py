@@ -1,27 +1,30 @@
-from src.env import TetrisEnv
 import argparse
+from src.env import CEMTrainer
 
 def main(args):
-    try: 
-        env = TetrisEnv(args.seed, args.num_envs, args.c, args.w, args.verbose)
+    trainer = CEMTrainer(args.c, args.verbose)
+    try:
         if args.mode == "train":
-            env.train(args.o)
-        else: 
-            env.test(args.o, args.num_episodes)
-    except KeyboardInterrupt as e: 
-        env.save_weights(args.o)
-        env.close()
+            trainer.train(args.o)
+        elif args.mode == "test":
+            trainer.test(args.o, args.num_episodes)
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        if trainer.best_weights is not None:
+            import numpy as np, os
+            os.makedirs(args.o, exist_ok=True)
+            np.save(os.path.join(args.o, "interrupted_weights.npy"), trainer.best_weights)
+            print(f"Best weights saved to {args.o}/interrupted_weights.npy")
+        trainer.close()
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train/Render Tetris Simulations")
-    parser.add_argument("--c", type=str, help="Config path for Tetris model")
-    parser.add_argument("--o", type=str, help="Output path for Tetris model")
-    parser.add_argument("--w", type=str, help="Path to available weights")
-    parser.add_argument("--seed", type=int, default=1898, help="Seed for experiment reproduciability")
-    parser.add_argument("--mode", choices=["train", "test"], default="train", help="Mode to test/train Tetris Agent")
-    parser.add_argument("--num_envs", type=int, help="Number of parallel environments to run at the same time")
-    parser.add_argument("--num_episodes", type=int, default=1, help="Number of episodes to run for testing")
-    parser.add_argument("--verbose", action="store_true", help="Render the Tetris game")
+    parser = argparse.ArgumentParser(description="Tetris AI — CEM Weight Optimization")
+    parser.add_argument("--c", type=str, required=True, help="Config YAML path")
+    parser.add_argument("--o", type=str, required=True, help="Output directory")
+    parser.add_argument("--mode", choices=["train", "test"], default="train")
+    parser.add_argument("--num_episodes", type=int, default=10)
+    parser.add_argument("--verbose", action="store_true")
+
     args = parser.parse_args()
-    
     main(args)
