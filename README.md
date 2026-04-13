@@ -1,7 +1,7 @@
 # Tetris.AI
 
 <p align="center">
-  <img src="videos/tetris-episode-0.gif" alt="Tetris AI gameplay">
+  <img src="videos/tetris-episode-0.gif" alt="Tetris AI gameplay" width="100%">
 </p>
 
 > Trained agent playing Tetris up to 10,000 placed pieces, clearing 4000 lines
